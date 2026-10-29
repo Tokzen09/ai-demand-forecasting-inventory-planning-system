@@ -1,4 +1,4 @@
-"""Phase 1 descriptive dashboard; forecasting arrives in Phase 2."""
+"""Historical exploration and saved seven-day customer-demand forecasts."""
 
 from pathlib import Path
 import sys
@@ -13,10 +13,15 @@ if str(ROOT) not in sys.path:
 from src.config import DEFAULT_DATA_PATH
 from src.data_access import load_dashboard_sales
 from src.database import DatabaseError, local_settings
+from dashboard.forecast_panel import (
+    cached_artifacts, render_forecast_panel,
+)
 
 st.set_page_config(page_title="Demand & Inventory Planning", layout="wide")
 st.title("AI Demand Forecasting & Inventory Planning")
-st.caption("Phase 1 · Synthetic data exploration · No trained models")
+st.caption(
+    "Phase 3B · Synthetic retail exploration and saved demand forecasts"
+)
 default_source = local_settings().get("DASHBOARD_DATA_SOURCE", "mysql")
 sources = ["mysql", "csv"]
 source = st.sidebar.selectbox(
@@ -33,6 +38,7 @@ def cached_sales(data_source, revision):
 
 if st.sidebar.button("Refresh data"):
     cached_sales.clear()
+    cached_artifacts.clear()
 revision_file = ROOT / ".env" if source == "mysql" else DEFAULT_DATA_PATH
 revision = revision_file.stat().st_mtime_ns if revision_file.exists() else 0
 try:
@@ -87,3 +93,5 @@ st.dataframe(filtered.head(100), width="stretch")
 st.caption(
     "Zero closing stock is a stockout-risk signal, not a lost-sales measure."
 )
+
+render_forecast_panel(data, filtered)
