@@ -23,6 +23,9 @@ for an exploratory dashboard; Pytest for tests. Scikit-learn is installed for
 Phase 2 but is not used for model training. Git/GitHub are intended for version
 control; no remote repository is created or pushed automatically.
 
+MySQL Connector/Python and python-dotenv provide local MySQL integration.
+SQLite remains available as the original EDA export.
+
 ## Structure
 
 ```text
@@ -34,6 +37,11 @@ src/
   data_generation.py    # Seeded demand and replenishment simulation
   quality.py            # Dataset contract validation
   eda.py                # Descriptive reports and database export
+  database.py           # Scoped MySQL connection, schema, and SQL operations
+  import_mysql.py       # Validated repeatable MySQL import and verification
+  data_access.py        # Dashboard MySQL/CSV read adapter
+sql/                    # MySQL schema and Workbench verification queries
+.env.example            # Connection template; real .env is ignored
 models/                 # Reserved for Phase 2; intentionally empty
 dashboard/app.py        # Phase 1 Streamlit explorer
 tests/                  # Data, inventory, reproducibility, EDA tests
@@ -160,3 +168,128 @@ must be reported separately from automated tests.
    GitHub publishing workflow.
 
 Do not start Phase 2 or create/push a GitHub repository without user approval.
+
+## MySQL integration
+
+Use the existing **demand_forecasting_db** on **localhost:3306**. The importer
+does not create databases, drop tables, truncate records, or access another
+database. MySQL **8.0.19+** is required (enforced CHECK constraints and row-alias
+upserts). Tables prefixed `df_` are owned by this project; do not reuse those
+names for unrelated data. Existing tables are not altered by this script;
+incompatible existing definitions must be reviewed rather than overwritten.
+
+### Configure the connection
+
+Install dependencies in the existing virtual environment:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install --index-url https://pypi.org/simple -r requirements.txt
+```
+
+A local `.env` has been prepared with a blank password. Edit it in VS Code;
+do not paste credentials into a terminal command, source file, or chat. For a
+new clone, copy `.env.example` to `.env` only if `.env` does not already exist:
+
+```powershell
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
+code .env
+```
+
+Set `MYSQL_HOST=localhost`, `MYSQL_PORT=3306`,
+`MYSQL_DATABASE=demand_forecasting_db`, and your local MySQL user/password.
+The sample user is `root`; substitute your own account. Prefer a dedicated
+account whose permissions are restricted to this database. Schema creation
+needs CREATE, REFERENCES, SELECT, INSERT, and UPDATE permissions; the dashboard
+only reads and can use a SELECT-only account after import. No user accounts or
+grants are created automatically.
+
+Use `MYSQL_PASSWORD='your local password'` when it contains `#`, spaces, or `$`.
+The parser disables variable interpolation to preserve literal dollar signs.
+Do not use a blank password. Real process environment variables override `.env`.
+The credentials are neither logged nor cached by the dashboard.
+The `.gitignore` excludes `.env` and permits the password-free `.env.example`.
+
+### Schema and repeatable import
+
+```powershell
+.\.venv\Scripts\python.exe -m src.import_mysql
+# Run again: existing natural keys are updated, not duplicated.
+.\.venv\Scripts\python.exe -m src.import_mysql
+# Compare every original CSV value with the database without writing:
+.\.venv\Scripts\python.exe -m src.import_mysql --verify-only
+```
+
+The importer reads the existing CSV without regenerating or changing it. It
+validates daily coverage, keys, quantities, inventory continuity, fulfillment,
+and demand/lost-sales balance before connecting. One name is required per SKU.
+Products, stores, and facts are then upserted in a single InnoDB transaction;
+an insertion failure rolls back all data writes in that import. MySQL schema
+DDL commits separately, so empty created tables can remain if data loading fails.
+Post-commit verification reports any round-trip mismatch; it does not undo an
+already committed transaction. Commands exit nonzero on failure with sanitized
+messages. Re-running an import updates matching keys; it does not remove rows
+absent from the CSV. Do not use this utility for unrelated business data.
+
+| Table | Role and key |
+|---|---|
+| df_products | Product ID primary key; product name |
+| df_stores | Store ID primary key |
+| df_daily_sales | Daily observations; primary key `(date, store_id, product_id)` |
+
+Facts reference both dimension tables. Prices and expected demand use DECIMAL;
+dates use DATE; nonnegative quantities use unsigned integers. Supplier lead time
+and price are retained per day to preserve historical observations. SQL CHECK
+constraints enforce row-level inventory/demand balance. Cross-day continuity
+is validated in Python and by the Workbench query, not by a row-level CHECK.
+
+### Dashboard
+
+```powershell
+.\.venv\Scripts\python.exe -m streamlit run dashboard/app.py
+```
+
+MySQL is the default source. The existing store/product filters, metrics, sales
+and demand chart, product performance, and preview are preserved. Choose `csv`
+in the sidebar for explicit offline exploration. MySQL errors are displayed
+without raw credentials or connector diagnostics; there is no silent fallback.
+Use **Refresh data** after import or allow the 60-second record cache to expire.
+The dashboard does not create tables or import records. SQLite EDA outputs and
+`main.py` remain unchanged; neither is required for the MySQL import.
+
+### Verify in MySQL Workbench
+
+Connect to your local server and open `sql/verify_mysql.sql`. Execute it using
+the lightning button (or Ctrl+Shift+Enter for the script). On the original seed-42
+dataset expect 6 products, 3 stores, 13,158 facts, 380,466 demand units, 380,002
+sold units, and 464 lost units. Balance, continuity, and receipt timing violation
+counts should all be zero. Execute the import twice and rerun the counts to
+confirm repeatability. The script is read-only and selects the project database.
+
+### Tests and troubleshooting
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q
+```
+
+Automated tests cover local configuration, database scoping, secret redaction,
+parameter binding, rollback, round-trip verification, and MySQL/CSV dashboard
+behavior using mocks. They do not require credentials or modify a real database.
+Actual MySQL validation is provided by the import and `--verify-only` commands;
+mock tests alone do not prove live server compatibility.
+
+After a successful import, opt into the real read-only round-trip test:
+
+```powershell
+$env:RUN_MYSQL_READ_TEST = '1'
+.\.venv\Scripts\python.exe -m pytest tests/test_mysql_live.py -q
+Remove-Item Env:RUN_MYSQL_READ_TEST
+```
+
+If prompted to configure credentials, edit `.env`. Connector error 1045 usually
+means authentication or grants; 1049 means the database does not exist; 2003 means
+the server/port is unreachable; 1146 means import has not created the tables.
+Check Workbench for detailed diagnostics locally without sharing passwords.
+If MySQL is older than 8.0.19, update the local server before importing.
+
+The upsert behavior follows the official [MySQL INSERT documentation](https://dev.mysql.com/doc/refman/8.0/en/insert.html),
+and transaction handling follows [Connector/Python commit](https://dev.mysql.com/doc/connector-python/en/connector-python-api-mysqlconnection-commit.html).
